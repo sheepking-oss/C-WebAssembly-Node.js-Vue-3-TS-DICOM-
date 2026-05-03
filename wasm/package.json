@@ -1,0 +1,19 @@
+{
+  "name": "wasm",
+  "version": "1.0.0",
+  "description": "WebAssembly DICOM 解析模块",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "emcc -O3 -s WASM=1 -s EXPORTED_RUNTIME_METHODS=['cwrap','ccall','getValue','setValue','stringToUTF8','UTF8ToString'] -s EXPORTED_FUNCTIONS=['_malloc','_free','_dicom_parse','_dicom_get_pixel_data','_dicom_get_metadata','_dicom_free'] -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4GB -I./include src/dicom_parser.cpp -o dist/dicom_parser.js --post-js src/post.js",
+    "build:debug": "emcc -g4 -s WASM=1 -s EXPORTED_RUNTIME_METHODS=['cwrap','ccall','getValue','setValue','stringToUTF8','UTF8ToString'] -s EXPORTED_FUNCTIONS=['_malloc','_free','_dicom_parse','_dicom_get_pixel_data','_dicom_get_metadata','_dicom_free'] -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4GB -I./include src/dicom_parser.cpp -o dist/dicom_parser.js --post-js src/post.js",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "WebAssembly",
+    "DICOM",
+    "医疗影像"
+  ],
+  "author": "",
+  "license": "MIT"
+}
