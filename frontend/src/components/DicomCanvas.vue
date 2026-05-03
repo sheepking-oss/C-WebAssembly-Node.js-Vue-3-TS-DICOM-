@@ -104,6 +104,9 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { DicomRenderer, rafThrottle, throttle } from '@/utils/dicomRenderer';
 import type { ParsedDicom, WindowLevelParams } from '@/types/dicom';
 
+const MIN_DELTA_THRESHOLD = 1;
+const PIXEL_UPDATE_THROTTLE = 150;
+
 interface Props {
   dicomData?: ParsedDicom | null;
   isLoading?: boolean;
@@ -226,23 +229,43 @@ function requestRender(): void {
   );
 }
 
+function renderImmediate(): void {
+  if (!canvasRef.value || !renderer.value) return;
+
+  renderer.value.setWindowLevel(currentWindowLevel.value.center, currentWindowLevel.value.width);
+  const success = renderer.value.renderToCanvas(
+    canvasRef.value,
+    scale.value,
+    offsetX.value,
+    offsetY.value
+  );
+
+  if (!success) {
+    console.error('渲染失败');
+  }
+}
+
 function scheduleRender(): void {
   if (isRenderScheduled.value) return;
 
   isRenderScheduled.value = true;
   renderAnimationFrameId.value = requestAnimationFrame(() => {
-    processAccumulatedDeltas();
-    requestRender();
+    const hasChanges = processAccumulatedDeltas();
+    if (hasChanges) {
+      renderImmediate();
+    }
     isRenderScheduled.value = false;
     renderAnimationFrameId.value = null;
   });
 }
 
-function processAccumulatedDeltas(): void {
+function processAccumulatedDeltas(): boolean {
   const dx = accumulatedDeltaX.value;
   const dy = accumulatedDeltaY.value;
 
-  if (dx === 0 && dy === 0) return;
+  if (Math.abs(dx) < MIN_DELTA_THRESHOLD && Math.abs(dy) < MIN_DELTA_THRESHOLD) {
+    return false;
+  }
 
   accumulatedDeltaX.value = 0;
   accumulatedDeltaY.value = 0;
@@ -258,6 +281,8 @@ function processAccumulatedDeltas(): void {
       applyPanDelta(dx, dy);
       break;
   }
+
+  return true;
 }
 
 function applyWindowLevelDelta(deltaX: number, deltaY: number): void {
@@ -334,7 +359,11 @@ function handleMouseDown(event: MouseEvent): void {
 
 const throttledPixelUpdate = throttle((event: MouseEvent) => {
   updatePixelValue(event);
-}, 100);
+}, PIXEL_UPDATE_THROTTLE);
+
+const rafScheduledRender = rafThrottle(() => {
+  scheduleRender();
+});
 
 function handleMouseMove(event: MouseEvent): void {
   if (!hasImage.value || !canvasRef.value) return;
@@ -355,7 +384,7 @@ function handleMouseMove(event: MouseEvent): void {
   lastMouseX.value = event.clientX;
   lastMouseY.value = event.clientY;
 
-  scheduleRender();
+  rafScheduledRender();
 }
 
 function handleMouseUp(): void {
@@ -365,7 +394,7 @@ function handleMouseUp(): void {
 
   if (accumulatedDeltaX.value !== 0 || accumulatedDeltaY.value !== 0) {
     processAccumulatedDeltas();
-    requestRender();
+    renderImmediate();
   }
 
   accumulatedDeltaX.value = 0;
