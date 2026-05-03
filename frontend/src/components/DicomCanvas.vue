@@ -101,7 +101,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
-import { DicomRenderer } from '@/utils/dicomRenderer';
+import { DicomRenderer, rafThrottle, throttle } from '@/utils/dicomRenderer';
 import type { ParsedDicom, WindowLevelParams } from '@/types/dicom';
 
 interface Props {
@@ -147,6 +147,11 @@ const lastMouseY = ref(0);
 const lastWindowLevel = ref<WindowLevelParams>({ center: 0, width: 255 });
 const lastScale = ref(1);
 const lastOffset = ref({ x: 0, y: 0 });
+
+const accumulatedDeltaX = ref(0);
+const accumulatedDeltaY = ref(0);
+const isRenderScheduled = ref(false);
+const renderAnimationFrameId = ref<number | null>(null);
 
 const hasImage = computed(() => !!props.dicomData);
 
@@ -209,6 +214,83 @@ function render(): void {
   }
 }
 
+function requestRender(): void {
+  if (!canvasRef.value || !renderer.value) return;
+
+  renderer.value.setWindowLevel(currentWindowLevel.value.center, currentWindowLevel.value.width);
+  renderer.value.requestRender(
+    canvasRef.value,
+    scale.value,
+    offsetX.value,
+    offsetY.value
+  );
+}
+
+function scheduleRender(): void {
+  if (isRenderScheduled.value) return;
+
+  isRenderScheduled.value = true;
+  renderAnimationFrameId.value = requestAnimationFrame(() => {
+    processAccumulatedDeltas();
+    requestRender();
+    isRenderScheduled.value = false;
+    renderAnimationFrameId.value = null;
+  });
+}
+
+function processAccumulatedDeltas(): void {
+  const dx = accumulatedDeltaX.value;
+  const dy = accumulatedDeltaY.value;
+
+  if (dx === 0 && dy === 0) return;
+
+  accumulatedDeltaX.value = 0;
+  accumulatedDeltaY.value = 0;
+
+  switch (toolMode.value) {
+    case 'wwl':
+      applyWindowLevelDelta(dx, dy);
+      break;
+    case 'zoom':
+      applyScaleDelta(dy);
+      break;
+    case 'pan':
+      applyPanDelta(dx, dy);
+      break;
+  }
+}
+
+function applyWindowLevelDelta(deltaX: number, deltaY: number): void {
+  if (!renderer.value) return;
+
+  const wcMultiplier = 2;
+  const wwMultiplier = 4;
+
+  const deltaCenter = -deltaY * wcMultiplier;
+  const deltaWidth = deltaX * wwMultiplier;
+
+  const newCenter = currentWindowLevel.value.center + deltaCenter;
+  const newWidth = Math.max(1, currentWindowLevel.value.width + deltaWidth);
+
+  currentWindowLevel.value = {
+    center: newCenter,
+    width: newWidth
+  };
+
+  emit('windowLevelChange', { ...currentWindowLevel.value });
+}
+
+function applyScaleDelta(deltaY: number): void {
+  const scaleFactor = 1 - (deltaY / 200);
+  scale.value = Math.max(0.1, Math.min(10, scale.value * scaleFactor));
+  emit('scaleChange', scale.value);
+}
+
+function applyPanDelta(deltaX: number, deltaY: number): void {
+  offsetX.value += deltaX;
+  offsetY.value += deltaY;
+}
+
 function resizeCanvas(): void {
   if (!canvasRef.value || !containerRef.value) return;
 
@@ -244,13 +326,20 @@ function handleMouseDown(event: MouseEvent): void {
   lastScale.value = scale.value;
   lastOffset.value = { x: offsetX.value, y: offsetY.value };
 
+  accumulatedDeltaX.value = 0;
+  accumulatedDeltaY.value = 0;
+
   canvasRef.value.style.cursor = getCursorStyle();
 }
+
+const throttledPixelUpdate = throttle((event: MouseEvent) => {
+  updatePixelValue(event);
+}, 100);
 
 function handleMouseMove(event: MouseEvent): void {
   if (!hasImage.value || !canvasRef.value) return;
 
-  updatePixelValue(event);
+  throttledPixelUpdate(event);
 
   if (!isDragging.value) {
     canvasRef.value.style.cursor = getCursorStyle();
@@ -260,26 +349,27 @@ function handleMouseMove(event: MouseEvent): void {
   const deltaX = event.clientX - lastMouseX.value;
   const deltaY = event.clientY - lastMouseY.value;
 
-  switch (toolMode.value) {
-    case 'wwl':
-      adjustWindowLevel(deltaX, deltaY);
-      break;
-    case 'zoom':
-      adjustScale(deltaY);
-      break;
-    case 'pan':
-      adjustPan(deltaX, deltaY);
-      break;
-  }
+  accumulatedDeltaX.value += deltaX;
+  accumulatedDeltaY.value += deltaY;
 
   lastMouseX.value = event.clientX;
   lastMouseY.value = event.clientY;
+
+  scheduleRender();
 }
 
 function handleMouseUp(): void {
   if (!isDragging.value) return;
 
   isDragging.value = false;
+
+  if (accumulatedDeltaX.value !== 0 || accumulatedDeltaY.value !== 0) {
+    processAccumulatedDeltas();
+    requestRender();
+  }
+
+  accumulatedDeltaX.value = 0;
+  accumulatedDeltaY.value = 0;
 
   if (canvasRef.value) {
     canvasRef.value.style.cursor = getCursorStyle();
@@ -311,41 +401,26 @@ function handleWheel(event: WheelEvent): void {
   }
 
   emit('scaleChange', scale.value);
-  render();
+  requestRender();
 }
 
 function adjustWindowLevel(deltaX: number, deltaY: number): void {
   if (!renderer.value) return;
 
-  const wcMultiplier = 2;
-  const wwMultiplier = 4;
-
-  const deltaCenter = -deltaY * wcMultiplier;
-  const deltaWidth = deltaX * wwMultiplier;
-
-  const newCenter = currentWindowLevel.value.center + deltaCenter;
-  const newWidth = Math.max(1, currentWindowLevel.value.width + deltaWidth);
-
-  currentWindowLevel.value = {
-    center: newCenter,
-    width: newWidth
-  };
-
-  emit('windowLevelChange', { ...currentWindowLevel.value });
-  render();
+  accumulatedDeltaX.value += deltaX;
+  accumulatedDeltaY.value += deltaY;
+  scheduleRender();
 }
 
 function adjustScale(deltaY: number): void {
-  const scaleFactor = 1 - (deltaY / 200);
-  scale.value = Math.max(0.1, Math.min(10, scale.value * scaleFactor));
-  emit('scaleChange', scale.value);
-  render();
+  accumulatedDeltaY.value += deltaY;
+  scheduleRender();
 }
 
 function adjustPan(deltaX: number, deltaY: number): void {
-  offsetX.value += deltaX;
-  offsetY.value += deltaY;
-  render();
+  accumulatedDeltaX.value += deltaX;
+  accumulatedDeltaY.value += deltaY;
+  scheduleRender();
 }
 
 function updatePixelValue(event: MouseEvent): void {
@@ -406,7 +481,7 @@ function resetWindowLevel(): void {
   };
 
   emit('windowLevelChange', { ...currentWindowLevel.value });
-  render();
+  requestRender();
 }
 
 watch(
@@ -423,7 +498,7 @@ watch(
   (newWl) => {
     if (newWl && hasImage.value) {
       currentWindowLevel.value = { ...newWl };
-      render();
+      requestRender();
     }
   },
   { deep: true }
@@ -452,6 +527,15 @@ onUnmounted(() => {
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
+  }
+
+  if (renderAnimationFrameId.value !== null) {
+    cancelAnimationFrame(renderAnimationFrameId.value);
+    renderAnimationFrameId.value = null;
+  }
+
+  if (renderer.value) {
+    renderer.value.dispose();
   }
 });
 
